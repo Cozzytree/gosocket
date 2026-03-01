@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Go Socket Example</title>
+  </head>
+  <body>
+    <h1>Go Socket Room Demo</h1>
+    <pre id="log"></pre>
+    <script>
+      const log = (msg) => {
+        document.getElementById("log").textContent += msg + "\n";
+      };
+
+      const ws = new WebSocket("ws://localhost:8080/ws");
+      ws.onopen = () => {
+        log("connected");
+        ws.send(JSON.stringify({ type: "subscribe", room: "news" }));
+
+        setTimeout(() => {
+          ws.send(
+            JSON.stringify({
+              type: "publish",
+              room: "news",
+              event: "headline",
+              payloadType: "text",
+              payload: "Hello from browser",
+            })
+          );
+        }, 300);
+      };
+
+      ws.onmessage = (ev) => log(`recv: ${ev.data}`);
+      ws.onclose = () => log("closed");
+      ws.onerror = (err) => log("error: " + err.message);
+    </script>
+  </body>
+</html>
