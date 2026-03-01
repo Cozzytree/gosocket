@@ -7,7 +7,6 @@ import {
 } from "./errors";
 import type {
   AckKey,
-  CloseInfo,
   ConnectionState,
   Envelope,
   EventHandler,
@@ -50,14 +49,19 @@ export class SocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionNonce = 0;
 
-  private readonly listeners = new Map<keyof SocketClientEvents, Set<EventHandler<unknown>>>();
+  private readonly listeners = new Map<
+    keyof SocketClientEvents,
+    Set<EventHandler<unknown>>
+  >();
 
   private readonly desiredRooms = new Set<string>();
   private readonly activeRooms = new Set<string>();
   private readonly pendingAcks = new Map<AckKey, PendingAck[]>();
   private readonly queuedPublishes: Envelope[] = [];
 
-  constructor(input: Partial<SocketClientOptions> & Pick<SocketClientOptions, "url">) {
+  constructor(
+    input: Partial<SocketClientOptions> & Pick<SocketClientOptions, "url">,
+  ) {
     this.options = {
       ...DEFAULT_OPTIONS,
       ...input,
@@ -74,14 +78,20 @@ export class SocketClient {
     return this.state;
   }
 
-  on<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): () => void {
+  on<K extends keyof SocketClientEvents>(
+    event: K,
+    handler: EventHandler<SocketClientEvents[K]>,
+  ): () => void {
     const set = this.listeners.get(event) ?? new Set<EventHandler<unknown>>();
     set.add(handler as EventHandler<unknown>);
     this.listeners.set(event, set);
     return () => this.off(event, handler);
   }
 
-  off<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): void {
+  off<K extends keyof SocketClientEvents>(
+    event: K,
+    handler: EventHandler<SocketClientEvents[K]>,
+  ): void {
     this.listeners.get(event)?.delete(handler as EventHandler<unknown>);
   }
 
@@ -158,7 +168,9 @@ export class SocketClient {
           }
         };
       } catch (error) {
-        const wrapped = new SocketClientError("Failed to create WebSocket", { cause: error });
+        const wrapped = new SocketClientError("Failed to create WebSocket", {
+          cause: error,
+        });
         this.rejectConnect(wrapped);
         this.setState("closed");
       }
@@ -171,6 +183,12 @@ export class SocketClient {
     if (this.disposed) return;
     this.userClosed = true;
     this.clearReconnectTimer();
+
+    if (!this.ws || this.ws.readyState === 3) {
+      this.setState("closed");
+      return;
+    }
+
     this.setState("closing");
     this.safeCloseSocket(code, reason);
   }
@@ -201,7 +219,12 @@ export class SocketClient {
     }
 
     await this.connect();
-    await this.sendWithAck({ type: "subscribe", room }, room, "subscribe", signal);
+    await this.sendWithAck(
+      { type: "subscribe", room },
+      room,
+      "subscribe",
+      signal,
+    );
     this.activeRooms.add(room);
   }
 
@@ -215,11 +238,21 @@ export class SocketClient {
       return;
     }
 
-    await this.sendWithAck({ type: "unsubscribe", room }, room, "unsubscribe", signal);
+    await this.sendWithAck(
+      { type: "unsubscribe", room },
+      room,
+      "unsubscribe",
+      signal,
+    );
     this.activeRooms.delete(room);
   }
 
-  async publish(room: string, event: string, payload: unknown, options: PublishOptions = {}): Promise<void> {
+  async publish(
+    room: string,
+    event: string,
+    payload: unknown,
+    options: PublishOptions = {},
+  ): Promise<void> {
     this.assertNotDisposed();
     this.assertRoom(room);
     this.assertNonEmpty(event, "event");
@@ -241,7 +274,9 @@ export class SocketClient {
     if (options.queueIfDisconnected) {
       this.enqueuePublish(envelope);
       if (this.state === "idle" || this.state === "closed") {
-        void this.connect().catch((error) => this.emit("error", error as Error));
+        void this.connect().catch((error) =>
+          this.emit("error", error as Error),
+        );
       }
       return;
     }
@@ -264,7 +299,11 @@ export class SocketClient {
     await ackPromise;
   }
 
-  private waitForAck(room: string, action: "subscribe" | "unsubscribe", signal?: AbortSignal): Promise<void> {
+  private waitForAck(
+    room: string,
+    action: "subscribe" | "unsubscribe",
+    signal?: AbortSignal,
+  ): Promise<void> {
     const key = `${action}:${room}` as AckKey;
 
     return new Promise<void>((resolve, reject) => {
@@ -325,7 +364,10 @@ export class SocketClient {
     }
   }
 
-  private resolvePendingAck(action: "subscribe" | "unsubscribe", room: string): void {
+  private resolvePendingAck(
+    action: "subscribe" | "unsubscribe",
+    room: string,
+  ): void {
     const key = `${action}:${room}` as AckKey;
     const list = this.pendingAcks.get(key);
     if (!list || list.length === 0) return;
@@ -359,7 +401,10 @@ export class SocketClient {
         await this.sendWithAck({ type: "subscribe", room }, room, "subscribe");
         this.activeRooms.add(room);
       } catch (error) {
-        this.options.logger?.warn?.(`failed to resubscribe room '${room}'`, error);
+        this.options.logger?.warn?.(
+          `failed to resubscribe room '${room}'`,
+          error,
+        );
       }
     }
 
@@ -372,7 +417,10 @@ export class SocketClient {
 
   private handleMessage(raw: string | ArrayBuffer | Blob): void {
     if (typeof raw !== "string") {
-      this.emit("error", new ValidationError("Server sent non-text frame; ignoring message"));
+      this.emit(
+        "error",
+        new ValidationError("Server sent non-text frame; ignoring message"),
+      );
       return;
     }
 
@@ -400,7 +448,10 @@ export class SocketClient {
     }
 
     if (env.type === "error") {
-      this.emit("error", new SocketClientError(`Server error event '${env.event ?? "unknown"}'`));
+      this.emit(
+        "error",
+        new SocketClientError(`Server error event '${env.event ?? "unknown"}'`),
+      );
     }
 
     this.emit("message", env);
@@ -413,7 +464,14 @@ export class SocketClient {
     }
 
     const candidate = input as Partial<Envelope>;
-    const validTypes = new Set(["subscribe", "unsubscribe", "publish", "message", "error", "info"]);
+    const validTypes = new Set([
+      "subscribe",
+      "unsubscribe",
+      "publish",
+      "message",
+      "error",
+      "info",
+    ]);
 
     if (typeof candidate.type !== "string" || !validTypes.has(candidate.type)) {
       this.emit("error", new ValidationError("Envelope type is invalid"));
@@ -426,7 +484,10 @@ export class SocketClient {
     }
 
     if (candidate.event !== undefined && typeof candidate.event !== "string") {
-      this.emit("error", new ValidationError("Envelope event must be a string"));
+      this.emit(
+        "error",
+        new ValidationError("Envelope event must be a string"),
+      );
       return null;
     }
 
@@ -436,7 +497,10 @@ export class SocketClient {
       candidate.payloadType !== "text" &&
       candidate.payloadType !== "binary"
     ) {
-      this.emit("error", new ValidationError("Envelope payloadType is invalid"));
+      this.emit(
+        "error",
+        new ValidationError("Envelope payloadType is invalid"),
+      );
       return null;
     }
 
@@ -449,14 +513,19 @@ export class SocketClient {
     return "json";
   }
 
-  private normalizePayloadForType(payload: unknown, payloadType: PayloadType): unknown {
+  private normalizePayloadForType(
+    payload: unknown,
+    payloadType: PayloadType,
+  ): unknown {
     if (payloadType === "json") {
       return payload;
     }
 
     if (payloadType === "text") {
       if (typeof payload !== "string") {
-        throw new ValidationError("payload must be a string when payloadType is 'text'");
+        throw new ValidationError(
+          "payload must be a string when payloadType is 'text'",
+        );
       }
       return payload;
     }
@@ -474,7 +543,9 @@ export class SocketClient {
     return this.toBase64(payload);
   }
 
-  private isBinaryPayload(payload: unknown): payload is ArrayBuffer | ArrayBufferView {
+  private isBinaryPayload(
+    payload: unknown,
+  ): payload is ArrayBuffer | ArrayBufferView {
     return payload instanceof ArrayBuffer || ArrayBuffer.isView(payload);
   }
 
@@ -482,7 +553,11 @@ export class SocketClient {
     const bytes =
       payload instanceof ArrayBuffer
         ? new Uint8Array(payload)
-        : new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
+        : new Uint8Array(
+            payload.buffer,
+            payload.byteOffset,
+            payload.byteLength,
+          );
 
     if (typeof btoa === "function") {
       let binary = "";
@@ -494,8 +569,13 @@ export class SocketClient {
       return btoa(binary);
     }
 
-    const maybeBuffer = (globalThis as { Buffer?: { from: (input: Uint8Array) => { toString: (enc: string) => string } } })
-      .Buffer;
+    const maybeBuffer = (
+      globalThis as {
+        Buffer?: {
+          from: (input: Uint8Array) => { toString: (enc: string) => string };
+        };
+      }
+    ).Buffer;
     if (maybeBuffer) {
       return maybeBuffer.from(bytes).toString("base64");
     }
@@ -536,10 +616,14 @@ export class SocketClient {
     }
 
     this.reconnectAttempts += 1;
-    const base = retry.initialDelayMs * Math.pow(retry.factor, this.reconnectAttempts - 1);
+    const base =
+      retry.initialDelayMs * Math.pow(retry.factor, this.reconnectAttempts - 1);
     const clamped = Math.min(base, retry.maxDelayMs);
     const jitterDelta = clamped * retry.jitter;
-    const delayMs = Math.max(0, Math.round(clamped + (Math.random() * 2 - 1) * jitterDelta));
+    const delayMs = Math.max(
+      0,
+      Math.round(clamped + (Math.random() * 2 - 1) * jitterDelta),
+    );
 
     this.emit("reconnectAttempt", { attempt: this.reconnectAttempts, delayMs });
 
@@ -588,11 +672,17 @@ export class SocketClient {
   private safeCloseSocket(code: number, reason: string): void {
     if (!this.ws) return;
     try {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      if (
+        this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING
+      ) {
         this.ws.close(code, reason);
       }
     } catch (error) {
-      this.emit("error", new SocketClientError("Failed to close websocket", { cause: error }));
+      this.emit(
+        "error",
+        new SocketClientError("Failed to close websocket", { cause: error }),
+      );
     }
   }
 
@@ -602,7 +692,10 @@ export class SocketClient {
     this.emit("state", next);
   }
 
-  private emit<K extends keyof SocketClientEvents>(event: K, payload: SocketClientEvents[K]): void {
+  private emit<K extends keyof SocketClientEvents>(
+    event: K,
+    payload: SocketClientEvents[K],
+  ): void {
     const handlers = this.listeners.get(event);
     if (!handlers || handlers.size === 0) return;
 
@@ -626,7 +719,12 @@ export class SocketClient {
       throw new ValidationError("ackTimeoutMs must be a positive number");
     }
 
-    if (retry.initialDelayMs < 0 || retry.maxDelayMs <= 0 || retry.factor < 1 || retry.maxRetries < 0) {
+    if (
+      retry.initialDelayMs < 0 ||
+      retry.maxDelayMs <= 0 ||
+      retry.factor < 1 ||
+      retry.maxRetries < 0
+    ) {
       throw new ValidationError("retry options are invalid");
     }
 

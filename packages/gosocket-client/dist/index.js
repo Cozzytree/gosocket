@@ -151,7 +151,9 @@ var SocketClient = class {
           }
         };
       } catch (error) {
-        const wrapped = new SocketClientError("Failed to create WebSocket", { cause: error });
+        const wrapped = new SocketClientError("Failed to create WebSocket", {
+          cause: error
+        });
         this.rejectConnect(wrapped);
         this.setState("closed");
       }
@@ -162,6 +164,10 @@ var SocketClient = class {
     if (this.disposed) return;
     this.userClosed = true;
     this.clearReconnectTimer();
+    if (!this.ws || this.ws.readyState === 3) {
+      this.setState("closed");
+      return;
+    }
     this.setState("closing");
     this.safeCloseSocket(code, reason);
   }
@@ -185,7 +191,12 @@ var SocketClient = class {
       return;
     }
     await this.connect();
-    await this.sendWithAck({ type: "subscribe", room }, room, "subscribe", signal);
+    await this.sendWithAck(
+      { type: "subscribe", room },
+      room,
+      "subscribe",
+      signal
+    );
     this.activeRooms.add(room);
   }
   async unsubscribe(room, signal) {
@@ -196,7 +207,12 @@ var SocketClient = class {
       this.activeRooms.delete(room);
       return;
     }
-    await this.sendWithAck({ type: "unsubscribe", room }, room, "unsubscribe", signal);
+    await this.sendWithAck(
+      { type: "unsubscribe", room },
+      room,
+      "unsubscribe",
+      signal
+    );
     this.activeRooms.delete(room);
   }
   async publish(room, event, payload, options = {}) {
@@ -218,7 +234,9 @@ var SocketClient = class {
     if (options.queueIfDisconnected) {
       this.enqueuePublish(envelope);
       if (this.state === "idle" || this.state === "closed") {
-        void this.connect().catch((error) => this.emit("error", error));
+        void this.connect().catch(
+          (error) => this.emit("error", error)
+        );
       }
       return;
     }
@@ -312,7 +330,10 @@ var SocketClient = class {
         await this.sendWithAck({ type: "subscribe", room }, room, "subscribe");
         this.activeRooms.add(room);
       } catch (error) {
-        this.options.logger?.warn?.(`failed to resubscribe room '${room}'`, error);
+        this.options.logger?.warn?.(
+          `failed to resubscribe room '${room}'`,
+          error
+        );
       }
     }
     while (this.queuedPublishes.length > 0 && this.state === "open") {
@@ -323,7 +344,10 @@ var SocketClient = class {
   }
   handleMessage(raw) {
     if (typeof raw !== "string") {
-      this.emit("error", new ValidationError("Server sent non-text frame; ignoring message"));
+      this.emit(
+        "error",
+        new ValidationError("Server sent non-text frame; ignoring message")
+      );
       return;
     }
     let parsed;
@@ -346,7 +370,10 @@ var SocketClient = class {
       }
     }
     if (env.type === "error") {
-      this.emit("error", new SocketClientError(`Server error event '${env.event ?? "unknown"}'`));
+      this.emit(
+        "error",
+        new SocketClientError(`Server error event '${env.event ?? "unknown"}'`)
+      );
     }
     this.emit("message", env);
   }
@@ -356,7 +383,14 @@ var SocketClient = class {
       return null;
     }
     const candidate = input;
-    const validTypes = /* @__PURE__ */ new Set(["subscribe", "unsubscribe", "publish", "message", "error", "info"]);
+    const validTypes = /* @__PURE__ */ new Set([
+      "subscribe",
+      "unsubscribe",
+      "publish",
+      "message",
+      "error",
+      "info"
+    ]);
     if (typeof candidate.type !== "string" || !validTypes.has(candidate.type)) {
       this.emit("error", new ValidationError("Envelope type is invalid"));
       return null;
@@ -366,11 +400,17 @@ var SocketClient = class {
       return null;
     }
     if (candidate.event !== void 0 && typeof candidate.event !== "string") {
-      this.emit("error", new ValidationError("Envelope event must be a string"));
+      this.emit(
+        "error",
+        new ValidationError("Envelope event must be a string")
+      );
       return null;
     }
     if (candidate.payloadType !== void 0 && candidate.payloadType !== "json" && candidate.payloadType !== "text" && candidate.payloadType !== "binary") {
-      this.emit("error", new ValidationError("Envelope payloadType is invalid"));
+      this.emit(
+        "error",
+        new ValidationError("Envelope payloadType is invalid")
+      );
       return null;
     }
     return candidate;
@@ -386,7 +426,9 @@ var SocketClient = class {
     }
     if (payloadType === "text") {
       if (typeof payload !== "string") {
-        throw new ValidationError("payload must be a string when payloadType is 'text'");
+        throw new ValidationError(
+          "payload must be a string when payloadType is 'text'"
+        );
       }
       return payload;
     }
@@ -404,7 +446,11 @@ var SocketClient = class {
     return payload instanceof ArrayBuffer || ArrayBuffer.isView(payload);
   }
   toBase64(payload) {
-    const bytes = payload instanceof ArrayBuffer ? new Uint8Array(payload) : new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
+    const bytes = payload instanceof ArrayBuffer ? new Uint8Array(payload) : new Uint8Array(
+      payload.buffer,
+      payload.byteOffset,
+      payload.byteLength
+    );
     if (typeof btoa === "function") {
       let binary = "";
       const chunkSize = 32768;
@@ -449,7 +495,10 @@ var SocketClient = class {
     const base = retry.initialDelayMs * Math.pow(retry.factor, this.reconnectAttempts - 1);
     const clamped = Math.min(base, retry.maxDelayMs);
     const jitterDelta = clamped * retry.jitter;
-    const delayMs = Math.max(0, Math.round(clamped + (Math.random() * 2 - 1) * jitterDelta));
+    const delayMs = Math.max(
+      0,
+      Math.round(clamped + (Math.random() * 2 - 1) * jitterDelta)
+    );
     this.emit("reconnectAttempt", { attempt: this.reconnectAttempts, delayMs });
     this.clearReconnectTimer();
     this.reconnectTimer = setTimeout(() => {
@@ -493,7 +542,10 @@ var SocketClient = class {
         this.ws.close(code, reason);
       }
     } catch (error) {
-      this.emit("error", new SocketClientError("Failed to close websocket", { cause: error }));
+      this.emit(
+        "error",
+        new SocketClientError("Failed to close websocket", { cause: error })
+      );
     }
   }
   setState(next) {
