@@ -73,7 +73,18 @@ func (h *Hub) Unsubscribe(c *Client, room string) {
 	}
 }
 
-func (h *Hub) Publish(room string, msg Envelope) error {
+// IsMember reports whether c is currently subscribed to room.
+func (h *Hub) IsMember(c *Client, room string) bool {
+	if room == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.rooms[room][c]
+	return ok
+}
+
+func (h *Hub) Publish(room string, msg []byte) error {
 	if room == "" {
 		return ErrRoomRequired
 	}
@@ -84,9 +95,12 @@ func (h *Hub) Publish(room string, msg Envelope) error {
 	members := h.rooms[room]
 	for c := range members {
 		select {
+		case <-c.done:
+			// Client is closing; remove asynchronously.
+			go c.Close()
 		case c.send <- msg:
 		default:
-			// Slow or disconnected clients are removed asynchronously.
+			// Slow client; remove asynchronously.
 			go c.Close()
 		}
 	}

@@ -1,9 +1,13 @@
-type EnvelopeType = "subscribe" | "unsubscribe" | "publish" | "message" | "error" | "info";
-interface Envelope {
-    type: EnvelopeType;
-    room?: string;
-    event?: string;
-    payload?: unknown;
+declare enum PacketType {
+    Event = 2,
+    Ack = 3,
+    Error = 4
+}
+interface Packet {
+    type: PacketType;
+    nsp: string;
+    data: any[];
+    id?: number;
 }
 interface RetryOptions {
     enabled: boolean;
@@ -26,9 +30,8 @@ interface SocketClientOptions {
     queue: QueueOptions;
     logger: Pick<Console, "debug" | "warn" | "error">;
 }
-interface PublishOptions {
+interface EmitOptions {
     queueIfDisconnected?: boolean;
-    signal?: AbortSignal;
 }
 type ConnectionState = "idle" | "connecting" | "open" | "closing" | "closed" | "disposed";
 interface CloseInfo {
@@ -41,12 +44,10 @@ interface SocketClientEvents {
     open: void;
     close: CloseInfo;
     error: Error;
-    message: Envelope;
     reconnectAttempt: {
         attempt: number;
         delayMs: number;
     };
-    droppedMessage: Envelope;
 }
 type EventHandler<T> = (payload: T) => void;
 
@@ -63,29 +64,30 @@ declare class SocketClient {
     private connectTimer;
     private reconnectTimer;
     private connectionNonce;
-    private readonly listeners;
+    private nextAckId;
+    private readonly sysListeners;
+    private readonly evtListeners;
     private readonly desiredRooms;
     private readonly activeRooms;
     private readonly pendingAcks;
     private readonly queuedPublishes;
     constructor(input: Partial<SocketClientOptions> & Pick<SocketClientOptions, "url">);
     get connectionState(): ConnectionState;
-    on<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): () => void;
-    off<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): void;
+    onSys<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): () => void;
+    offSys<K extends keyof SocketClientEvents>(event: K, handler: EventHandler<SocketClientEvents[K]>): void;
+    on(event: string, handler: EventHandler<any[]>): () => void;
+    off(event: string, handler: EventHandler<any[]>): void;
     connect(): Promise<void>;
     disconnect(code?: number, reason?: string): void;
     dispose(): void;
-    subscribe(room: string, signal?: AbortSignal): Promise<void>;
-    unsubscribe(room: string, signal?: AbortSignal): Promise<void>;
-    publish(room: string, event: string, payload: unknown, options?: PublishOptions): Promise<void>;
-    private sendWithAck;
+    emit(event: string, ...args: any[]): Promise<void>;
     private waitForAck;
+    private sendWithAck;
     private removePendingAck;
     private resolvePendingAck;
     private rejectAllPendingAcks;
     private resubscribeAndFlush;
     private handleMessage;
-    private validateEnvelope;
     private sendRaw;
     private enqueuePublish;
     private scheduleReconnect;
@@ -97,7 +99,7 @@ declare class SocketClient {
     private clearReconnectTimer;
     private safeCloseSocket;
     private setState;
-    private emit;
+    private emitSys;
     private validateOptions;
     private validateUrl;
     private assertRoom;
@@ -123,4 +125,4 @@ declare class TimeoutError extends SocketClientError {
     constructor(message: string);
 }
 
-export { type CloseInfo, ConnectionClosedError, type ConnectionState, DisposedError, type Envelope, type PublishOptions, type QueueOptions, type RetryOptions, SocketClient, SocketClientError, type SocketClientEvents, type SocketClientOptions, TimeoutError, ValidationError };
+export { type CloseInfo, ConnectionClosedError, type ConnectionState, DisposedError, type EmitOptions, type Packet, PacketType, type QueueOptions, type RetryOptions, SocketClient, SocketClientError, type SocketClientEvents, type SocketClientOptions, TimeoutError, ValidationError };

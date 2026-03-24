@@ -1,14 +1,11 @@
-export declare enum PacketType {
-    Event = 2,
-    Ack = 3,
-    Error = 4
-}
-export type AckFn = (...args: any[]) => void;
-export interface Packet {
-    type: PacketType;
-    nsp: string;
-    data: any[];
-    id?: number;
+export type EnvelopeType = "subscribe" | "unsubscribe" | "publish" | "message" | "error" | "info";
+export type PayloadType = "json" | "text" | "binary";
+export interface Envelope {
+    type: EnvelopeType;
+    room?: string;
+    event?: string;
+    payloadType?: PayloadType;
+    payload?: unknown;
 }
 export interface RetryOptions {
     enabled: boolean;
@@ -31,8 +28,10 @@ export interface SocketClientOptions {
     queue: QueueOptions;
     logger: Pick<Console, "debug" | "warn" | "error">;
 }
-export interface EmitOptions {
+export interface PublishOptions {
     queueIfDisconnected?: boolean;
+    signal?: AbortSignal;
+    payloadType?: PayloadType;
 }
 export type ConnectionState = "idle" | "connecting" | "open" | "closing" | "closed" | "disposed";
 export interface CloseInfo {
@@ -45,14 +44,17 @@ export interface SocketClientEvents {
     open: void;
     close: CloseInfo;
     error: Error;
+    message: Envelope;
     reconnectAttempt: {
         attempt: number;
         delayMs: number;
     };
+    droppedMessage: Envelope;
 }
 export type EventHandler<T> = (payload: T) => void;
 export interface PendingAck {
-    resolve: (...args: any[]) => void;
+    resolve: () => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
 }
+export type AckKey = `${"subscribe" | "unsubscribe"}:${string}`;

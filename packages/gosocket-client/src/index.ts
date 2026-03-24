@@ -9,9 +9,9 @@ export {
 export type {
   CloseInfo,
   ConnectionState,
-  Envelope,
-  PayloadType,
-  PublishOptions,
+  Packet,
+  PacketType,
+  EmitOptions,
   QueueOptions,
   RetryOptions,
   SocketClientEvents,

@@ -1,4 +1,5 @@
 import { ConnectionClosedError, DisposedError, SocketClientError, TimeoutError, ValidationError, } from "./errors";
+import { PacketType } from "./types";
 const DEFAULT_OPTIONS = {
     connectTimeoutMs: 8000,
     ackTimeoutMs: 5000,
@@ -29,7 +30,11 @@ export class SocketClient {
     connectTimer = null;
     reconnectTimer = null;
     connectionNonce = 0;
-    listeners = new Map();
+    nextAckId = 0;
+    // Track system events (connect, disconnect, etc)
+    sysListeners = new Map();
+    // Track custom events sent from the server
+    evtListeners = new Map();
     desiredRooms = new Set();
     activeRooms = new Set();
     pendingAcks = new Map();
@@ -48,14 +53,23 @@ export class SocketClient {
     get connectionState() {
         return this.state;
     }
-    on(event, handler) {
-        const set = this.listeners.get(event) ?? new Set();
+    onSys(event, handler) {
+        const set = this.sysListeners.get(event) ?? new Set();
         set.add(handler);
-        this.listeners.set(event, set);
+        this.sysListeners.set(event, set);
+        return () => this.offSys(event, handler);
+    }
+    offSys(event, handler) {
+        this.sysListeners.get(event)?.delete(handler);
+    }
+    on(event, handler) {
+        const set = this.evtListeners.get(event) ?? new Set();
+        set.add(handler);
+        this.evtListeners.set(event, set);
         return () => this.off(event, handler);
     }
     off(event, handler) {
-        this.listeners.get(event)?.delete(handler);
+        this.evtListeners.get(event)?.delete(handler);
     }
     async connect() {
         this.assertNotDisposed();
@@ -123,7 +137,9 @@ export class SocketClient {
                 };
             }
             catch (error) {
-                const wrapped = new SocketClientError("Failed to create WebSocket", { cause: error });
+                const wrapped = new SocketClientError("Failed to create WebSocket", {
+                    cause: error,
+                });
                 this.rejectConnect(wrapped);
                 this.setState("closed");
             }
@@ -135,6 +151,10 @@ export class SocketClient {
             return;
         this.userClosed = true;
         this.clearReconnectTimer();
+        if (!this.ws || this.ws.readyState === 3) {
+            this.setState("closed");
+            return;
+        }
         this.setState("closing");
         this.safeCloseSocket(code, reason);
     }
@@ -149,130 +169,97 @@ export class SocketClient {
         this.rejectConnect(new DisposedError());
         this.setState("disposed");
         this.safeCloseSocket(1000, "disposed");
-        this.listeners.clear();
+        this.sysListeners.clear();
+        this.evtListeners.clear();
     }
-    async subscribe(room, signal) {
+    async emit(event, ...args) {
         this.assertNotDisposed();
-        this.assertRoom(room);
-        this.desiredRooms.add(room);
-        if (this.activeRooms.has(room) && this.state === "open") {
-            return;
-        }
-        await this.connect();
-        await this.sendWithAck({ type: "subscribe", room }, room, "subscribe", signal);
-        this.activeRooms.add(room);
-    }
-    async unsubscribe(room, signal) {
-        this.assertNotDisposed();
-        this.assertRoom(room);
-        this.desiredRooms.delete(room);
-        if (this.state !== "open") {
-            this.activeRooms.delete(room);
-            return;
-        }
-        await this.sendWithAck({ type: "unsubscribe", room }, room, "unsubscribe", signal);
-        this.activeRooms.delete(room);
-    }
-    async publish(room, event, payload, options = {}) {
-        this.assertNotDisposed();
-        this.assertRoom(room);
         this.assertNonEmpty(event, "event");
-        const envelope = { type: "publish", room, event, payload };
+        // Check if the last argument is an ack callback (Socket.IO style)
+        let ackFn;
+        if (args.length > 0 && typeof args[args.length - 1] === "function") {
+            ackFn = args.pop();
+        }
+        const packet = {
+            type: PacketType.Event,
+            nsp: "/", // default namespace / room
+            data: [event, ...args],
+        };
+        if (ackFn) {
+            packet.id = ++this.nextAckId;
+            this.waitForAck(packet.id, ackFn);
+        }
         if (this.state === "open") {
-            this.sendRaw(envelope);
+            this.sendRaw(packet);
             return;
         }
-        if (options.queueIfDisconnected) {
-            this.enqueuePublish(envelope);
-            if (this.state === "idle" || this.state === "closed") {
-                void this.connect().catch((error) => this.emit("error", error));
-            }
-            return;
+        // Since we don't have EmitOptions inline as easily, default to not queueing unless re-implemented later.
+        // For now, let's just queue everything if disconnected.
+        this.enqueuePublish(packet);
+        if (this.state === "idle" || this.state === "closed") {
+            void this.connect().catch((error) => this.emitSys("error", error));
         }
-        throw new ConnectionClosedError();
     }
-    async sendWithAck(envelope, room, action, signal) {
-        if (this.state !== "open") {
-            throw new ConnectionClosedError();
-        }
-        const ackPromise = this.waitForAck(room, action, signal);
-        this.sendRaw(envelope);
-        await ackPromise;
-    }
-    waitForAck(room, action, signal) {
-        const key = `${action}:${room}`;
-        return new Promise((resolve, reject) => {
-            let ack;
-            const onAbort = () => {
-                cleanup();
-                if (ack)
-                    this.removePendingAck(key, ack);
-                reject(new SocketClientError(`${action} aborted`));
-            };
-            const cleanup = () => {
-                clearTimeout(timer);
-                signal?.removeEventListener("abort", onAbort);
-            };
-            const timer = setTimeout(() => {
-                cleanup();
-                if (ack)
-                    this.removePendingAck(key, ack);
-                reject(new TimeoutError(`${action} ack timed out for room '${room}'`));
-            }, this.options.ackTimeoutMs);
-            if (signal?.aborted) {
-                cleanup();
-                reject(new SocketClientError(`${action} aborted`));
-                return;
-            }
-            signal?.addEventListener("abort", onAbort, { once: true });
-            ack = {
-                resolve: () => {
-                    cleanup();
-                    resolve();
-                },
-                reject: (error) => {
-                    cleanup();
-                    reject(error);
-                },
-                timer,
-            };
-            const existing = this.pendingAcks.get(key) ?? [];
-            existing.push(ack);
-            this.pendingAcks.set(key, existing);
+    waitForAck(id, callback) {
+        const timer = setTimeout(() => {
+            this.pendingAcks.delete(id);
+            this.options.logger?.warn?.(`Ack timeout for id ${id}`);
+        }, this.options.ackTimeoutMs);
+        this.pendingAcks.set(id, {
+            resolve: callback,
+            reject: () => { }, // Not used directly in Socket.IO acks typically, timeouts are silent or warned
+            timer,
         });
     }
-    removePendingAck(key, ack) {
-        const list = this.pendingAcks.get(key);
-        if (!list)
-            return;
-        const index = list.indexOf(ack);
-        if (index >= 0) {
-            list.splice(index, 1);
-        }
-        if (list.length === 0) {
-            this.pendingAcks.delete(key);
-        }
+    async sendWithAck(packet, id, signal) {
+        return new Promise((resolve, reject) => {
+            if (signal?.aborted) {
+                return reject(new SocketClientError(`sendWithAck aborted`));
+            }
+            const timer = setTimeout(() => {
+                this.pendingAcks.delete(id);
+                reject(new SocketClientError(`Timeout waiting for ack on packet ${id}`));
+            }, this.options.ackTimeoutMs);
+            const ack = {
+                resolve: (...args) => resolve(args),
+                reject,
+                timer,
+            };
+            this.pendingAcks.set(id, ack);
+            if (signal) {
+                signal.addEventListener("abort", () => {
+                    this.removePendingAck(id);
+                    reject(new SocketClientError(`sendWithAck aborted`));
+                });
+            }
+            try {
+                this.sendRaw(packet);
+            }
+            catch (error) {
+                this.removePendingAck(id);
+                reject(error);
+            }
+        });
     }
-    resolvePendingAck(action, room) {
-        const key = `${action}:${room}`;
-        const list = this.pendingAcks.get(key);
-        if (!list || list.length === 0)
+    removePendingAck(id) {
+        const ack = this.pendingAcks.get(id);
+        if (!ack)
             return;
-        const next = list.shift();
-        if (!next)
+        clearTimeout(ack.timer);
+        this.pendingAcks.delete(id);
+    }
+    resolvePendingAck(id, args) {
+        const ack = this.pendingAcks.get(id);
+        if (!ack)
             return;
-        clearTimeout(next.timer);
-        next.resolve();
-        if (list.length === 0) {
-            this.pendingAcks.delete(key);
-        }
+        clearTimeout(ack.timer);
+        ack.resolve(...args);
+        this.pendingAcks.delete(id);
     }
     rejectAllPendingAcks(error) {
-        for (const [, list] of this.pendingAcks) {
-            for (const pending of list) {
-                clearTimeout(pending.timer);
-                pending.reject(error);
-            }
+        for (const [, ack] of this.pendingAcks) {
+            clearTimeout(ack.timer);
+            ack.reject(error);
         }
         this.pendingAcks.clear();
     }
@@ -283,7 +270,7 @@ export class SocketClient {
             try {
                 if (this.activeRooms.has(room))
                     continue;
-                await this.sendWithAck({ type: "subscribe", room }, room, "subscribe");
+                await this.sendWithAck({ type: PacketType.Event, nsp: "/", data: ["subscribe", room] }, ++this.nextAckId);
                 this.activeRooms.add(room);
             }
             catch (error) {
@@ -299,81 +286,64 @@ export class SocketClient {
     }
     handleMessage(raw) {
         if (typeof raw !== "string") {
-            this.emit("error", new ValidationError("Server sent non-text frame; ignoring message"));
+            this.emitSys("error", new ValidationError("Server sent non-text frame; ignoring message"));
             return;
         }
         let parsed;
         try {
+            // Decode Socket.IO array payload: [event_name, args...]
             parsed = JSON.parse(raw);
         }
         catch {
-            this.emit("error", new ValidationError("Server sent invalid JSON"));
+            this.emitSys("error", new ValidationError("Server sent invalid JSON"));
             return;
         }
-        const env = this.validateEnvelope(parsed);
-        if (!env)
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+            return; // Invalid format
+        }
+        const eventName = parsed[0];
+        const args = parsed.slice(1);
+        // If it's a system message, handle it
+        if (eventName === "error") {
+            this.emitSys("error", new SocketClientError(`Server error: ${args[0]}`));
             return;
-        if (env.type === "info" && env.room) {
-            if (env.event === "subscribed") {
-                this.activeRooms.add(env.room);
-                this.resolvePendingAck("subscribe", env.room);
+        }
+        // Fire client custom event callback
+        const handlers = this.evtListeners.get(eventName);
+        if (handlers && handlers.size > 0) {
+            for (const handler of handlers) {
+                try {
+                    handler(...args);
+                }
+                catch (error) {
+                    this.options.logger?.error?.("event handler error", error);
+                }
             }
-            if (env.event === "unsubscribed") {
-                this.activeRooms.delete(env.room);
-                this.resolvePendingAck("unsubscribe", env.room);
-            }
         }
-        if (env.type === "error") {
-            this.emit("error", new SocketClientError(`Server error event '${env.event ?? "unknown"}'`));
-        }
-        this.emit("message", env);
     }
-    validateEnvelope(input) {
-        if (!input || typeof input !== "object") {
-            this.emit("error", new ValidationError("Envelope must be an object"));
-            return null;
-        }
-        const candidate = input;
-        const validTypes = new Set(["subscribe", "unsubscribe", "publish", "message", "error", "info"]);
-        if (typeof candidate.type !== "string" || !validTypes.has(candidate.type)) {
-            this.emit("error", new ValidationError("Envelope type is invalid"));
-            return null;
-        }
-        if (candidate.room !== undefined && typeof candidate.room !== "string") {
-            this.emit("error", new ValidationError("Envelope room must be a string"));
-            return null;
-        }
-        if (candidate.event !== undefined && typeof candidate.event !== "string") {
-            this.emit("error", new ValidationError("Envelope event must be a string"));
-            return null;
-        }
-        return candidate;
-    }
-    sendRaw(envelope) {
+    sendRaw(packet) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             throw new ConnectionClosedError();
         }
-        this.ws.send(JSON.stringify(envelope));
+        const serialized = JSON.stringify(packet.data);
+        this.ws.send(serialized);
     }
-    enqueuePublish(envelope) {
+    enqueuePublish(packet) {
         const { maxSize, dropPolicy } = this.options.queue;
         if (this.queuedPublishes.length >= maxSize) {
             if (dropPolicy === "newest") {
-                this.emit("droppedMessage", envelope);
-                return;
+                return; // drop
             }
-            const dropped = this.queuedPublishes.shift();
-            if (dropped)
-                this.emit("droppedMessage", dropped);
+            this.queuedPublishes.shift();
         }
-        this.queuedPublishes.push(envelope);
+        this.queuedPublishes.push(packet);
     }
     scheduleReconnect() {
         const retry = this.options.retry;
         if (!retry.enabled)
             return;
         if (this.reconnectAttempts >= retry.maxRetries) {
-            this.emit("error", new SocketClientError("Reconnect limit reached"));
+            this.emitSys("error", new SocketClientError("Reconnect limit reached"));
             return;
         }
         this.reconnectAttempts += 1;
@@ -381,10 +351,10 @@ export class SocketClient {
         const clamped = Math.min(base, retry.maxDelayMs);
         const jitterDelta = clamped * retry.jitter;
         const delayMs = Math.max(0, Math.round(clamped + (Math.random() * 2 - 1) * jitterDelta));
-        this.emit("reconnectAttempt", { attempt: this.reconnectAttempts, delayMs });
+        this.emitSys("reconnectAttempt", { attempt: this.reconnectAttempts, delayMs });
         this.clearReconnectTimer();
         this.reconnectTimer = setTimeout(() => {
-            void this.connect().catch((error) => this.emit("error", error));
+            void this.connect().catch((error) => this.emitSys("error", error));
         }, delayMs);
     }
     failConnect(error) {
@@ -423,22 +393,23 @@ export class SocketClient {
         if (!this.ws)
             return;
         try {
-            if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+            if (this.ws.readyState === WebSocket.OPEN ||
+                this.ws.readyState === WebSocket.CONNECTING) {
                 this.ws.close(code, reason);
             }
         }
         catch (error) {
-            this.emit("error", new SocketClientError("Failed to close websocket", { cause: error }));
+            this.emitSys("error", new SocketClientError("Failed to close websocket", { cause: error }));
         }
     }
     setState(next) {
         if (this.state === next)
             return;
         this.state = next;
-        this.emit("state", next);
+        this.emitSys("state", next);
     }
-    emit(event, payload) {
-        const handlers = this.listeners.get(event);
+    emitSys(event, payload) {
+        const handlers = this.sysListeners.get(event);
         if (!handlers || handlers.size === 0)
             return;
         for (const handler of handlers) {
@@ -458,7 +429,10 @@ export class SocketClient {
         if (ackTimeoutMs <= 0 || !Number.isFinite(ackTimeoutMs)) {
             throw new ValidationError("ackTimeoutMs must be a positive number");
         }
-        if (retry.initialDelayMs < 0 || retry.maxDelayMs <= 0 || retry.factor < 1 || retry.maxRetries < 0) {
+        if (retry.initialDelayMs < 0 ||
+            retry.maxDelayMs <= 0 ||
+            retry.factor < 1 ||
+            retry.maxRetries < 0) {
             throw new ValidationError("retry options are invalid");
         }
         if (retry.jitter < 0 || retry.jitter > 1) {

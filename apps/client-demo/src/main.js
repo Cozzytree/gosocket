@@ -23,8 +23,8 @@ app.innerHTML = `
     <div class="row">
       <input id="event" value="headline" placeholder="event" />
       <input id="payload" value='{"title":"hello"}' placeholder='{"json":"payload"}' />
-      <button id="publish">Publish</button>
-      <button id="publishQueued" class="warn">Publish (queue)</button>
+      <button id="emit">Emit Event</button>
+      <button id="emitAck" class="warn">Emit with Ack</button>
     </div>
 
     <div class="log" id="log"></div>
@@ -47,20 +47,21 @@ function parsePayload(input) {
         return JSON.parse(input);
     }
     catch {
-        throw new Error("Payload must be valid JSON");
+        return input; // fallback to string
     }
 }
 function attachClient(next) {
-    next.on("state", (state) => {
+    next.onSys("state", (state) => {
         statusEl.textContent = `state: ${state}`;
         log(`state -> ${state}`);
     });
-    next.on("open", () => log("open"));
-    next.on("close", (info) => log(`close code=${info.code} reason=${info.reason || "<none>"} clean=${info.wasClean}`));
-    next.on("error", (err) => log(`error: ${err.name}: ${err.message}`));
-    next.on("reconnectAttempt", (a) => log(`reconnect attempt=${a.attempt} delay=${a.delayMs}ms`));
-    next.on("droppedMessage", (m) => log(`dropped queued message room=${m.room} event=${m.event}`));
-    next.on("message", (msg) => log(`message: ${JSON.stringify(msg)}`));
+    next.onSys("open", () => log("open"));
+    next.onSys("close", (info) => log(`close code=${info.code} reason=${info.reason || "<none>"} clean=${info.wasClean}`));
+    next.onSys("error", (err) => log(`error: ${err.name}: ${err.message}`));
+    next.onSys("reconnectAttempt", (a) => log(`reconnect attempt=${a.attempt} delay=${a.delayMs}ms`));
+    // Catch-all arbitrary demo event listening
+    next.on("message", (...args) => log(`message: ${JSON.stringify(args)}`));
+    next.on("headline", (...args) => log(`headline: ${JSON.stringify(args)}`));
 }
 function getClient() {
     if (!client) {
@@ -108,25 +109,23 @@ document.querySelector("#disconnect").addEventListener("click", () => {
 });
 document.querySelector("#subscribe").addEventListener("click", () => {
     void safe("subscribe", async () => {
-        await getClient().subscribe(roomEl.value);
+        await getClient().emit("subscribe", roomEl.value);
     });
 });
 document.querySelector("#unsubscribe").addEventListener("click", () => {
     void safe("unsubscribe", async () => {
-        await getClient().unsubscribe(roomEl.value);
+        await getClient().emit("unsubscribe", roomEl.value);
     });
 });
-document.querySelector("#publish").addEventListener("click", () => {
-    void safe("publish", async () => {
-        await getClient().publish(roomEl.value, eventEl.value, parsePayload(payloadEl.value), {
-            queueIfDisconnected: false,
-        });
+document.querySelector("#emit").addEventListener("click", () => {
+    void safe("emit", async () => {
+        await getClient().emit(eventEl.value, parsePayload(payloadEl.value));
     });
 });
-document.querySelector("#publishQueued").addEventListener("click", () => {
-    void safe("publish_queued", async () => {
-        await getClient().publish(roomEl.value, eventEl.value, parsePayload(payloadEl.value), {
-            queueIfDisconnected: true,
+document.querySelector("#emitAck").addEventListener("click", () => {
+    void safe("emit_ack", async () => {
+        await getClient().emit(eventEl.value, parsePayload(payloadEl.value), (res) => {
+            log(`Ack received: ${JSON.stringify(res)}`);
         });
     });
 });

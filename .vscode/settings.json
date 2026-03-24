@@ -1,0 +1,5 @@
+{
+    "go.alternateTools": {
+        "go": "/home/deepcode/.local/share/mise/shims/go"
+    }
+}
